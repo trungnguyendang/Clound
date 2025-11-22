@@ -1,0 +1,9 @@
+#!/bin/bash
+export JAVA_HOME={{ JAVA_HOME_PATH }}
+export HADOOP_HOME={{ INSTALL_DIR }}/hadoop-{{ HADOOP_VERSION }}
+export SPARK_HOME={{ INSTALL_DIR }}/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}
+
+export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin:$SPARK_HOME/bin:$SPARK_HOME/sbin
+
+export SPARK_MASTER_HOST=spark-master
+export HADOOP_CONF_DIR=$HADOOP_HOME/etc/hadoop

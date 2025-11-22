@@ -1,0 +1,178 @@
+---
+# =============================================================================
+# P0: Config SSH no password (SSH TRUST)
+# =============================================================================
+- hosts: spark_master
+  become: yes
+  become_user: ubuntu
+  tasks:
+    - name: Generate SSH Keypair for Master
+      user:
+        name: ubuntu
+        generate_ssh_key: yes
+        ssh_key_bits: 2048
+        ssh_key_file: .ssh/id_rsa
+
+    - name: Fetch Master's Public Key to Local Machine
+      fetch:
+        src: /home/ubuntu/.ssh/id_rsa.pub
+        dest: /tmp/master_id_rsa.pub
+        flat: yes
+
+- hosts: all
+  become: yes
+  tasks:
+    - name: Add Master's Public Key to Authorized Keys
+      authorized_key:
+        user: ubuntu
+        state: present
+        key: "{{ lookup('file', '/tmp/master_id_rsa.pub') }}"
+
+# =============================================================================
+# P1: Installation and Configuration for All Nodes
+# =============================================================================
+- hosts: all
+  become: yes
+  vars:
+    HADOOP_VERSION: "2.7.1"
+    SPARK_VERSION: "2.4.3"
+    SPARK_HADOOP_VERSION: "2.7"
+    JAVA_HOME_PATH: "/usr/lib/jvm/java-8-openjdk-amd64"
+    INSTALL_DIR: "/opt"
+    hadoop_conf_dir: "/opt/hadoop-{{ HADOOP_VERSION }}/etc/hadoop"
+
+  tasks:
+    # --- CLEAN UP & PREPARE ---
+    - name: Clean up old versions
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/opt/hadoop-2.7.7"
+        - "/opt/spark-2.4.3-bin-hadoop2.7"
+        - "/opt/hadoop-{{ HADOOP_VERSION }}"
+        - "/tmp/hadoop-ubuntu"
+
+    - name: Map IP Master vào /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "10.0.1.10 spark-master"
+        state: present
+
+    # --- INSTALLATION ---
+    - name: Update APT and install Java 8
+      apt:
+        name:
+          - openjdk-8-jdk
+          - wget
+          - python3
+        state: present
+        update_cache: yes
+
+    - name: Download Hadoop
+      get_url:
+        url: "https://archive.apache.org/dist/hadoop/common/hadoop-{{ HADOOP_VERSION }}/hadoop-{{ HADOOP_VERSION }}.tar.gz"
+        dest: "/tmp/hadoop-{{ HADOOP_VERSION }}.tar.gz"
+
+    - name: Extract Hadoop
+      unarchive:
+        src: "/tmp/hadoop-{{ HADOOP_VERSION }}.tar.gz"
+        dest: "{{ INSTALL_DIR }}"
+        remote_src: yes
+        creates: "{{ INSTALL_DIR }}/hadoop-{{ HADOOP_VERSION }}"
+
+    - name: Download Spark
+      get_url:
+        url: "https://archive.apache.org/dist/spark/spark-{{ SPARK_VERSION }}/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}.tgz"
+        dest: "/tmp/spark-{{ SPARK_VERSION }}.tgz"
+
+    - name: Extract Spark
+      unarchive:
+        src: "/tmp/spark-{{ SPARK_VERSION }}.tgz"
+        dest: "{{ INSTALL_DIR }}"
+        remote_src: yes
+        creates: "{{ INSTALL_DIR }}/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}"
+
+    - name: Change ownership to ubuntu
+      file:
+        path: "{{ item }}"
+        owner: ubuntu
+        group: ubuntu
+        recurse: yes
+      loop:
+        - "{{ INSTALL_DIR }}/hadoop-{{ HADOOP_VERSION }}"
+        - "{{ INSTALL_DIR }}/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}"
+
+    # --- CONFIGURATION  ---
+
+    - name: Setup environment variables
+      template:
+        src: "templates/profile.sh.j2"
+        dest: "/etc/profile.d/spark_hadoop.sh"
+        mode: 0755
+
+    - name: Config hadoop-env.sh
+      lineinfile:
+        path: "{{ hadoop_conf_dir }}/hadoop-env.sh"
+        line: "export JAVA_HOME={{ JAVA_HOME_PATH }}"
+        create: yes
+
+    - name: Config core-site.xml
+      template:
+        src: "templates/core-site.xml.j2"
+        dest: "{{ hadoop_conf_dir }}/core-site.xml"
+
+    - name: Config hdfs-site.xml
+      template:
+        src: "templates/hdfs-site.xml.j2"
+        dest: "{{ hadoop_conf_dir }}/hdfs-site.xml"
+
+# =============================================================================
+# P2: Configuration for Master Node
+# =============================================================================
+- hosts: spark_master
+  become: yes
+  vars:
+    HADOOP_VERSION: "2.7.1"
+    SPARK_VERSION: "2.4.3"
+    SPARK_HADOOP_VERSION: "2.7"
+    hadoop_conf_dir: "/opt/hadoop-{{ HADOOP_VERSION }}/etc/hadoop"
+    spark_conf_dir: "/opt/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}/conf"
+
+  tasks:
+    - name: Config Hadoop slaves
+      copy:
+        content: |
+          spark-worker-1
+          spark-worker-2
+        dest: "{{ hadoop_conf_dir }}/slaves"
+
+    - name: Config Spark slaves
+      copy:
+        content: |
+          spark-worker-1
+          spark-worker-2
+        dest: "{{ spark_conf_dir }}/slaves"
+
+    - name: Config spark-env.sh (Master Host)
+      lineinfile:
+        path: "{{ spark_conf_dir }}/spark-env.sh"
+        line: "export SPARK_MASTER_HOST=spark-master"
+        create: yes
+
+# =============================================================================
+# P3: Configuration for Worker Nodes
+# =============================================================================
+- hosts: spark_workers
+  become: yes
+  vars:
+    SPARK_VERSION: "2.4.3"
+    SPARK_HADOOP_VERSION: "2.7"
+    spark_conf_dir: "/opt/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}/conf"
+
+  tasks:
+    - name: Config spark-env.sh on Workers
+      lineinfile:
+        path: "{{ spark_conf_dir }}/spark-env.sh"
+        line: "export SPARK_MASTER_HOST=spark-master"
+        create: yes
