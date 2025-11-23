@@ -4,6 +4,6 @@ output "spark_master_public_ip" {
 }
 
 output "spark_worker_public_ips" {
-  description = "list Public IP của các máy Worker""
+  description = "Worker VM Public IPs"
   value       = google_compute_instance.spark_worker[*].network_interface.0.access_config.0.nat_ip
 }

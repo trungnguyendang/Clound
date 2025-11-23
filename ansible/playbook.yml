@@ -13,6 +13,17 @@
         ssh_key_bits: 2048
         ssh_key_file: .ssh/id_rsa
 
+    - name: Configure SSH to disable Host Key Checking
+      copy:
+        dest: "/home/ubuntu/.ssh/config"
+        content: |
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+
     - name: Fetch Master's Public Key to Local Machine
       fetch:
         src: /home/ubuntu/.ssh/id_rsa.pub
@@ -93,6 +104,7 @@
         remote_src: yes
         creates: "{{ INSTALL_DIR }}/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}"
 
+    # Phân quyền cho thư mục cài đặt
     - name: Change ownership to ubuntu
       file:
         path: "{{ item }}"
@@ -112,9 +124,11 @@
         mode: 0755
 
     - name: Config hadoop-env.sh
-      lineinfile:
+      blockinfile:
         path: "{{ hadoop_conf_dir }}/hadoop-env.sh"
-        line: "export JAVA_HOME={{ JAVA_HOME_PATH }}"
+        block: |
+          export JAVA_HOME={{ JAVA_HOME_PATH }}
+          export HADOOP_SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         create: yes
 
     - name: Config core-site.xml
@@ -154,11 +168,92 @@
           spark-worker-2
         dest: "{{ spark_conf_dir }}/slaves"
 
-    - name: Config spark-env.sh (Master Host)
-      lineinfile:
+    # [SỬA] Chỉ giữ lại 1 task config này (có cả Host và SSH Opts)
+    - name: Config spark-env.sh (Master Host & SSH Opts)
+      blockinfile:
         path: "{{ spark_conf_dir }}/spark-env.sh"
-        line: "export SPARK_MASTER_HOST=spark-master"
+        block: |
+          export SPARK_MASTER_HOST=spark-master
+          export SPARK_SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         create: yes
+
+    # [QUAN TRỌNG] Task này đảm bảo quyền sở hữu file log thuộc về ubuntu
+    - name: Fix permissions recursively for Hadoop and Spark
+      file:
+        path: "{{ item }}"
+        owner: ubuntu
+        group: ubuntu
+        recurse: yes
+      loop:
+        - "/opt/hadoop-{{ HADOOP_VERSION }}"
+        - "/opt/spark-{{ SPARK_VERSION }}-bin-hadoop{{ SPARK_HADOOP_VERSION }}"
+
+    # 1. Format NameNode (Chạy bằng user ubuntu)
+    - name: Format HDFS NameNode (Only if not formatted)
+      shell: |
+        . /etc/profile.d/spark_hadoop.sh
+        hdfs namenode -format -force
+      args:
+        executable: /bin/bash
+        creates: /tmp/hadoop-ubuntu/dfs/name/current/VERSION
+      become: yes
+      become_user: ubuntu # <--- KEY FIX PERMISSION ERROR
+
+    # 2. Khởi động HDFS (Chạy bằng user ubuntu)
+    - name: Start HDFS Cluster
+      shell: |
+        . /etc/profile.d/spark_hadoop.sh
+        stop-dfs.sh
+        start-dfs.sh
+      args:
+        executable: /bin/bash
+      register: hdfs_start_output
+      become: yes
+      become_user: ubuntu # <--- KEY FIX PERMISSION ERROR
+
+    - name: Print HDFS Start Log
+      debug:
+        var: hdfs_start_output.stdout_lines
+
+    # Đợi NameNode thực sự lên (chỉ check cổng, bỏ check host)
+    - name: Wait for NameNode to start listening on port 9000
+      wait_for:
+#        host: "spark-master"  # Kiểm tra đúng host spark-master (đã map trong /etc/hosts)
+#        port: 9000
+#        delay: 10
+#        timeout: 60
+#        state: started
+        path: /opt/hadoop-2.7.1/logs/hadoop-ubuntu-namenode-spark-master.log
+        search_regex: "NameNode RPC up at"
+        timeout: 60
+
+    # 3. Tạo thư mục Input trên HDFS (Chạy bằng user ubuntu)
+    - name: Create HDFS Input Directory (/input)
+      shell: |
+        . /etc/profile.d/spark_hadoop.sh
+        hdfs dfs -mkdir -p /input
+      args:
+        executable: /bin/bash
+      become: yes
+      become_user: ubuntu # <--- KEY FIX PERMISSION ERROR
+
+    # 4. Khởi động Spark (Chạy bằng user ubuntu)
+    - name: Start Spark Cluster
+      shell: |
+        . /etc/profile.d/spark_hadoop.sh
+        stop-all.sh || true
+        start-master.sh
+        start-slaves.sh
+      args:
+        executable: /bin/bash
+      register: spark_start_output
+      become: yes
+      become_user: ubuntu # <--- KEY FIX PERMISSION ERROR
+
+    - name: Print Spark Start Log
+      debug:
+        var: spark_start_output.stdout_lines
+
 
 # =============================================================================
 # P3: Configuration for Worker Nodes
